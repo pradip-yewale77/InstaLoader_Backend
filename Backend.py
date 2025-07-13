@@ -9,12 +9,8 @@ import requests
 from threading import Thread, Lock
 from time import sleep
 import random
-import itertools
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
-from functools import lru_cache
-import re
-import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import ssl
 import urllib3
 
@@ -27,7 +23,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 DOWNLOAD_DIR = "temp_downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Global variables for performance
+# Global variables for proxy management
 working_proxies = []
 proxy_lock = Lock()
 last_proxy_update = 0
@@ -48,7 +44,6 @@ def fetch_proxies_from_api():
                     ip, port = proxy.split(':')
                     all_proxies.append(f"http://{ip}:{port}")
                     all_proxies.append(f"socks5://{ip}:{port}")
-        print(f"[INFO] Fetched {len(proxies)} proxies from ProxyScrape")
     except Exception as e:
         print(f"[ERROR] ProxyScrape failed: {e}")
     
@@ -61,66 +56,20 @@ def fetch_proxies_from_api():
             for proxy in proxies:
                 if ':' in proxy:
                     all_proxies.append(f"http://{proxy}")
-        print(f"[INFO] Fetched {len(proxies)} HTTP proxies from proxy-list.download")
     except Exception as e:
         print(f"[ERROR] proxy-list.download failed: {e}")
     
-    # Source 3: Hardcoded fast proxies as fallback
+    # Fallback hardcoded proxies
     fallback_proxies = [
         "http://47.74.152.29:8888",
         "http://103.149.162.194:80",
         "http://185.15.172.212:3128",
         "http://103.145.185.123:8080",
-        "http://200.123.3.54:3128",
-        "http://185.38.111.1:8080",
-        "http://103.216.207.15:8080",
         "socks5://184.178.172.3:4145",
         "socks5://72.210.221.197:4145",
         "socks5://98.162.25.4:31653",
         "socks5://184.178.172.25:15291",
         "socks5://72.195.34.35:27360",
-        "socks5://98.162.25.23:4145",
-        "socks5://72.210.252.134:46164",
-        "socks5://98.162.25.7:31653",
-        "socks5://98.162.25.29:31679",
-        "socks5://192.252.215.5:16137",
-        # Additional reliable proxies
-        "http://20.206.106.192:8123",
-        "http://103.241.227.108:6666",
-        "http://185.189.199.75:23500",
-        "http://51.158.68.133:8811",
-        "http://51.158.119.88:8811",
-        "http://164.90.179.64:8118",
-        "http://138.197.148.215:8118",
-        "socks5://68.71.249.153:48606",
-        "socks5://68.71.247.130:4145",
-        "socks5://174.77.111.197:4145",
-        "socks5://174.77.111.196:4145",
-        "socks5://199.58.185.9:4145",
-        "socks5://199.58.184.97:4145",
-        "socks5://72.206.181.103:4145",
-        "socks5://72.206.181.97:64943",
-        "socks5://72.221.164.34:60671",
-        "socks5://72.221.196.157:35904",
-        "socks5://174.64.199.79:4145",
-        "socks5://174.64.199.82:4145",
-        "socks5://72.195.34.58:4145",
-        "socks5://72.195.34.59:4145",
-        "socks5://72.195.34.60:27391",
-        "socks5://72.195.34.41:4145",
-        "socks5://72.195.34.42:4145",
-        "socks5://72.206.181.105:64935",
-        "socks5://72.210.208.101:4145",
-        "socks5://72.210.221.223:4145",
-        "socks5://72.210.252.137:4145",
-        "socks5://184.178.172.5:15303",
-        "socks5://184.178.172.11:4145",
-        "socks5://184.178.172.14:4145",
-        "socks5://184.178.172.17:4145",
-        "socks5://184.178.172.18:15280",
-        "socks5://184.178.172.23:4145",
-        "socks5://184.178.172.26:4145",
-        "socks5://184.178.172.28:15294",
     ]
     
     all_proxies.extend(fallback_proxies)
@@ -129,13 +78,11 @@ def fetch_proxies_from_api():
     unique_proxies = list(set(all_proxies))
     random.shuffle(unique_proxies)
     
-    print(f"[INFO] Total unique proxies collected: {len(unique_proxies)}")
     return unique_proxies
 
 def test_proxy_fast(proxy, timeout=2):
-    """Fast proxy test with very short timeout"""
+    """Fast proxy test with short timeout"""
     try:
-        # Use httpbin.org for faster testing
         test_url = "http://httpbin.org/ip"
         proxies = {"http": proxy, "https": proxy}
         
@@ -147,7 +94,7 @@ def test_proxy_fast(proxy, timeout=2):
         return None
 
 def update_working_proxies():
-    """Update working proxies list using concurrent testing"""
+    """Update working proxies list"""
     global working_proxies, last_proxy_update
     
     with proxy_lock:
@@ -156,17 +103,12 @@ def update_working_proxies():
             return working_proxies
         
         print("[INFO] Fetching fresh proxies...")
-        start_time = time.time()
-        
-        # Fetch fresh proxies
         all_proxies = fetch_proxies_from_api()
         
-        # Test proxies concurrently with limited workers for better performance
-        print(f"[INFO] Testing {len(all_proxies)} proxies concurrently...")
+        # Test proxies concurrently
         new_working_proxies = []
-        
-        # Test in batches for better performance
         batch_size = 50
+        
         for i in range(0, len(all_proxies), batch_size):
             batch = all_proxies[i:i + batch_size]
             
@@ -188,12 +130,11 @@ def update_working_proxies():
         working_proxies = new_working_proxies
         last_proxy_update = current_time
         
-        elapsed_time = time.time() - start_time
-        print(f"[INFO] Found {len(working_proxies)} working proxies in {elapsed_time:.2f}s")
+        print(f"[INFO] Found {len(working_proxies)} working proxies")
         return working_proxies
 
 def get_fast_proxy():
-    """Get a working proxy quickly"""
+    """Get a working proxy"""
     if not working_proxies:
         update_working_proxies()
     
@@ -201,24 +142,25 @@ def get_fast_proxy():
         return random.choice(working_proxies)
     return None
 
-def get_optimized_ydl_opts(use_proxy=True, output_path=None):
-    """Optimized yt-dlp options for better performance with SSL fix"""
-    base_opts = {
+def get_ydl_opts_with_proxy_ssl(output_path=None):
+    """Get yt-dlp options with proxy and SSL fixes"""
+    opts = {
         'quiet': True,
-        'no_warnings': True,
+        'skip_download': True if output_path is None else False,
+        'force_generic_extractor': False,
         'socket_timeout': 10,
         'retries': 2,
         'fragment_retries': 2,
-        'format': 'best[height<=720]/best',
+        'format': 'mp4/best',
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
         'referer': 'https://www.instagram.com/',
         
         # SSL Certificate fixes
-        'nocheckcertificate': True,  # Skip SSL certificate verification
-        'no_check_certificate': True,  # Alternative flag
-        'insecure': True,  # Allow insecure connections
+        'nocheckcertificate': True,
+        'no_check_certificate': True,
+        'insecure': True,
         
-        # Additional SSL-related options
+        # HTTP headers
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -227,25 +169,15 @@ def get_optimized_ydl_opts(use_proxy=True, output_path=None):
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
         },
-        
-        # Extractor-specific options
-        'extractor_args': {
-            'instagram': {
-                'api_version': 'v1',
-                'include_stories': False,
-            }
-        }
     }
     
     if output_path:
-        base_opts['outtmpl'] = output_path
-    else:
-        base_opts['skip_download'] = True
+        opts['outtmpl'] = output_path
     
-    return base_opts
+    return opts
 
-def download_with_fallback(url, ydl_opts, max_attempts=5):
-    """Download with fast proxy fallback and direct connection fallback"""
+def download_with_proxy_fallback(url, ydl_opts, max_attempts=3):
+    """Download with proxy fallback"""
     last_error = None
     
     for attempt in range(max_attempts):
@@ -259,7 +191,7 @@ def download_with_fallback(url, ydl_opts, max_attempts=5):
                     print(f"[INFO] Attempt {attempt + 1} using proxy: {proxy}")
                 else:
                     print(f"[INFO] Attempt {attempt + 1} using direct connection (no proxy available)")
-            else:  # Last attempt - try direct connection
+            else:  # Last attempt - direct connection
                 print(f"[INFO] Attempt {attempt + 1} using direct connection (final attempt)")
                 current_opts.pop('proxy', None)
             
@@ -269,21 +201,15 @@ def download_with_fallback(url, ydl_opts, max_attempts=5):
                 
         except Exception as e:
             last_error = e
-            error_msg = str(e)
-            print(f"[ERROR] Attempt {attempt + 1} failed: {error_msg}")
-            
-            # If SSL error, try without proxy on next attempt
-            if "SSL" in error_msg or "certificate" in error_msg.lower():
-                print(f"[INFO] SSL error detected, will try direct connection on next attempt")
+            print(f"[ERROR] Attempt {attempt + 1} failed: {str(e)}")
             
             if attempt < max_attempts - 1:
-                sleep(1)  # Slightly longer sleep between attempts
+                sleep(1)
     
     raise last_error
 
 @app.route('/get-reel-thumbnail', methods=['POST'])
 def get_thumbnail():
-    start_time = time.time()
     data = request.get_json()
     url = data.get("url")
     if not url:
@@ -292,17 +218,17 @@ def get_thumbnail():
     try:
         print(f"[INFO] Getting thumbnail for: {url}")
         
-        ydl_opts = get_optimized_ydl_opts(use_proxy=True)
-        info = download_with_fallback(url, ydl_opts, max_attempts=5)
+        # Get JSON metadata using yt-dlp with proxy and SSL fixes
+        ydl_opts = get_ydl_opts_with_proxy_ssl()
+        info = download_with_proxy_fallback(url, ydl_opts)
         
         thumbnail_url = info.get("thumbnail", "")
         video_id = info.get("id", "unknown")
-        title = info.get("title", "Instagram Reel")
 
         if not thumbnail_url:
             raise Exception("No thumbnail found")
 
-        # Fast thumbnail download with SSL disabled
+        # Fetch thumbnail image with proxy and SSL fixes
         proxy = get_fast_proxy()
         proxies = {"http": proxy, "https": proxy} if proxy else None
         
@@ -327,29 +253,21 @@ def get_thumbnail():
                 continue
         
         response.raise_for_status()
-        
         image_data = base64.b64encode(response.content).decode('utf-8')
         mime = response.headers.get("Content-Type", "image/jpeg")
 
-        elapsed_time = time.time() - start_time
-        print(f"[INFO] Thumbnail retrieved in {elapsed_time:.2f}s")
-
         return jsonify({
             "shortcode": video_id,
-            "title": title,
             "thumbnail_url": thumbnail_url,
-            "thumbnail_base64": f"data:{mime};base64,{image_data}",
-            "processing_time": f"{elapsed_time:.2f}s"
+            "thumbnail_base64": f"data:{mime};base64,{image_data}"
         })
 
     except Exception as e:
-        elapsed_time = time.time() - start_time
-        print(f"[ERROR] Thumbnail failed in {elapsed_time:.2f}s: {str(e)}")
-        return jsonify({"error": str(e), "processing_time": f"{elapsed_time:.2f}s"}), 500
+        print(f"[ERROR] Thumbnail failed: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/download-reel', methods=['POST'])
 def download_reel():
-    start_time = time.time()
     data = request.get_json()
     url = data.get("url")
     if not url:
@@ -360,9 +278,10 @@ def download_reel():
         
         uid = str(uuid.uuid4())
         filename_template = os.path.join(DOWNLOAD_DIR, f"{uid}.%(ext)s")
-        
-        ydl_opts = get_optimized_ydl_opts(use_proxy=True, output_path=filename_template)
-        info = download_with_fallback(url, ydl_opts, max_attempts=5)
+
+        # Download with proxy and SSL fixes
+        ydl_opts = get_ydl_opts_with_proxy_ssl(output_path=filename_template)
+        info = download_with_proxy_fallback(url, ydl_opts)
         
         # Find the downloaded file
         downloaded_file = None
@@ -374,115 +293,43 @@ def download_reel():
         
         if not downloaded_file or not os.path.exists(downloaded_file):
             raise Exception("Download failed - file not found")
-        
-        if os.path.getsize(downloaded_file) == 0:
-            raise Exception("Download failed - empty file")
 
         # Schedule cleanup
         def delete_later(path):
-            sleep(60)  # Keep file for 60 seconds
+            sleep(30)
             try:
                 os.remove(path)
                 print(f"[INFO] Deleted {path}")
             except Exception as e:
                 print(f"[Cleanup error] {e}")
 
-        Thread(target=delete_later, args=(downloaded_file,), daemon=True).start()
-
-        elapsed_time = time.time() - start_time
-        print(f"[INFO] Download completed in {elapsed_time:.2f}s")
+        Thread(target=delete_later, args=(downloaded_file,)).start()
 
         return send_file(
             downloaded_file,
             as_attachment=True,
-            download_name=f"instagram_reel_{uid}.mp4",
+            download_name=os.path.basename(downloaded_file),
             mimetype="video/mp4"
         )
 
     except Exception as e:
-        elapsed_time = time.time() - start_time
-        print(f"[ERROR] Download failed in {elapsed_time:.2f}s: {str(e)}")
-        return jsonify({"error": str(e), "processing_time": f"{elapsed_time:.2f}s"}), 500
-
-@app.route('/refresh-proxies', methods=['POST'])
-def refresh_proxies():
-    """Manually refresh proxy list"""
-    global last_proxy_update
-    last_proxy_update = 0  # Force refresh
-    working = update_working_proxies()
-    return jsonify({
-        "message": "Proxies refreshed",
-        "working_proxies": len(working),
-        "proxies": working[:5]  # Show first 5
-    })
-
-@app.route('/test-proxies', methods=['GET'])
-def test_proxies():
-    """Test current proxy list"""
-    start_time = time.time()
-    working = update_working_proxies()
-    elapsed_time = time.time() - start_time
-    
-    return jsonify({
-        "working_proxies": len(working),
-        "proxies": working[:10],  # Show first 10
-        "test_time": f"{elapsed_time:.2f}s"
-    })
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    """Health check with proxy status"""
-    proxy = get_fast_proxy()
-    return jsonify({
-        "status": "healthy",
-        "working_proxies": len(working_proxies),
-        "current_proxy": proxy,
-        "temp_files": len(os.listdir(DOWNLOAD_DIR)),
-        "last_proxy_update": time.time() - last_proxy_update
-    })
+        print(f"[ERROR] Download failed: {str(e)}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/")
 def home():
-    return jsonify({
-        "message": "Instagram Reel Downloader with SSL Certificate Fix",
-        "features": [
-            "Auto-fetches fresh proxies from multiple sources",
-            "Concurrent proxy testing",
-            "Fast failover mechanism",
-            "SSL certificate verification bypass",
-            "Direct connection fallback",
-            "Optimized for Instagram rate limits"
-        ],
-        "endpoints": {
-            "GET /": "This help message",
-            "GET /health": "Health check with proxy status",
-            "GET /test-proxies": "Test current proxy list",
-            "POST /refresh-proxies": "Manually refresh proxy list",
-            "POST /get-reel-thumbnail": "Get reel thumbnail",
-            "POST /download-reel": "Download reel video"
-        }
-    })
+    return jsonify({"message": "Instagram Reel Downloader is running with proxy and SSL support"})
 
 # Initialize proxies on startup
 def initialize_proxies():
     """Initialize working proxies on startup"""
-    print("[INFO] Initializing dynamic proxy system...")
+    print("[INFO] Initializing proxy system...")
     update_working_proxies()
     print(f"[INFO] Ready with {len(working_proxies)} working proxies")
 
 if __name__ == "__main__":
-    # Cleanup old files
-    try:
-        for filename in os.listdir(DOWNLOAD_DIR):
-            file_path = os.path.join(DOWNLOAD_DIR, filename)
-            if os.path.isfile(file_path):
-                os.remove(file_path)
-        print(f"[INFO] Cleaned up {DOWNLOAD_DIR}")
-    except Exception as e:
-        print(f"[ERROR] Cleanup failed: {e}")
-    
     # Initialize proxies
     initialize_proxies()
     
-    print("[INFO] Starting Instagram Reel Downloader with SSL Certificate Fix")
-    app.run(debug=True, host='0.0.0.0', port=5000, threaded=True)
+    print("[INFO] Starting Instagram Reel Downloader with proxy and SSL support")
+    app.run(debug=True)
