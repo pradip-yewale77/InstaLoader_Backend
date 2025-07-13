@@ -22,39 +22,26 @@ THUMBNAIL_CACHE = {}
 METADATA_CACHE = {}
 CACHE_DURATION = 3600  # 1 hour
 
-# Proxy configuration
+# Proxy configuration - DISABLED BY DEFAULT
 PROXY_CONFIG = {
-    'enabled': os.getenv('PROXY_ENABLED', 'true').lower() == 'true',
+    'enabled': os.getenv('PROXY_ENABLED', 'false').lower() == 'true',
     'primary_proxy': os.getenv('PRIMARY_PROXY', ''),
     'fallback_proxies': []
 }
-
-# Indian proxy servers (you can add more)
-INDIAN_PROXIES = [
-    'http://proxy-in-1.example.com:8080',
-    'http://proxy-in-2.example.com:8080',
-    'http://proxy-mumbai.example.com:8080',
-    'http://proxy-delhi.example.com:8080'
-]
 
 # Load proxy configuration from environment or use defaults
 def load_proxy_config():
     """Load proxy configuration from environment variables"""
     global PROXY_CONFIG
     
-    # Check for environment variables
-    if os.getenv('PROXY_LIST'):
+    # Only load proxies if explicitly enabled and provided
+    if PROXY_CONFIG['enabled'] and os.getenv('PROXY_LIST'):
         proxy_list = os.getenv('PROXY_LIST').split(',')
-        PROXY_CONFIG['fallback_proxies'] = [proxy.strip() for proxy in proxy_list]
-    else:
-        # Use default Indian proxies (you should replace with actual working proxies)
-        PROXY_CONFIG['fallback_proxies'] = INDIAN_PROXIES
+        PROXY_CONFIG['fallback_proxies'] = [proxy.strip() for proxy in proxy_list if proxy.strip()]
     
     # Set primary proxy if provided
-    if os.getenv('PRIMARY_PROXY'):
+    if PROXY_CONFIG['enabled'] and os.getenv('PRIMARY_PROXY'):
         PROXY_CONFIG['primary_proxy'] = os.getenv('PRIMARY_PROXY')
-    elif PROXY_CONFIG['fallback_proxies']:
-        PROXY_CONFIG['primary_proxy'] = PROXY_CONFIG['fallback_proxies'][0]
 
 def get_random_proxy():
     """Get a random proxy from the configured list"""
@@ -89,7 +76,7 @@ def get_ydl_proxy_opts(proxy_url=None):
     if proxy_url:
         return {
             'proxy': proxy_url,
-            'socket_timeout': 20,  # Increased timeout for proxy
+            'socket_timeout': 20,
             'retries': 3
         }
     return {}
@@ -154,9 +141,10 @@ def get_video_info_with_cache(url):
             'retries': 3
         }
         
-        # Add proxy configuration to yt-dlp options
-        proxy_opts = get_ydl_proxy_opts()
-        ydl_opts.update(proxy_opts)
+        # Add proxy configuration to yt-dlp options if enabled
+        if PROXY_CONFIG['enabled'] and PROXY_CONFIG['fallback_proxies']:
+            proxy_opts = get_ydl_proxy_opts()
+            ydl_opts.update(proxy_opts)
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -166,9 +154,9 @@ def get_video_info_with_cache(url):
         return info
         
     except Exception as e:
-        # Try with different proxy if available
-        if PROXY_CONFIG['enabled'] and PROXY_CONFIG['fallback_proxies']:
-            for proxy in PROXY_CONFIG['fallback_proxies']:
+        # Try with different proxy if available and enabled
+        if PROXY_CONFIG['enabled'] and len(PROXY_CONFIG['fallback_proxies']) > 1:
+            for proxy in PROXY_CONFIG['fallback_proxies'][1:]:  # Skip first proxy
                 try:
                     ydl_opts = {
                         'quiet': True,
@@ -188,6 +176,26 @@ def get_video_info_with_cache(url):
                     return info
                 except:
                     continue
+        
+        # Try without proxy if proxy was causing issues
+        if PROXY_CONFIG['enabled']:
+            try:
+                ydl_opts = {
+                    'quiet': True,
+                    'skip_download': True,
+                    'force_generic_extractor': False,
+                    'socket_timeout': 15,
+                    'retries': 2
+                }
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    
+                # Cache the result
+                METADATA_CACHE[cache_key] = (info, time.time())
+                return info
+            except:
+                pass
         
         # If we have expired cache, return it as fallback
         if cache_key in METADATA_CACHE:
@@ -221,12 +229,12 @@ def get_thumbnail():
 
         # Fetch thumbnail with timeout and retry logic
         max_retries = 3
-        proxies = get_proxy_dict()
+        proxies = get_proxy_dict() if PROXY_CONFIG['enabled'] else None
         
         for attempt in range(max_retries):
             try:
                 # Use different proxy for each retry if available
-                if PROXY_CONFIG['enabled'] and attempt > 0:
+                if PROXY_CONFIG['enabled'] and attempt > 0 and len(PROXY_CONFIG['fallback_proxies']) > 1:
                     proxies = get_proxy_dict(get_random_proxy())
                 
                 response = requests.get(
@@ -239,7 +247,17 @@ def get_thumbnail():
                 break
             except requests.RequestException as e:
                 if attempt == max_retries - 1:
-                    return jsonify({"error": f"Failed to fetch thumbnail after {max_retries} attempts: {str(e)}"}), 500
+                    # Try once more without proxy
+                    try:
+                        response = requests.get(
+                            thumbnail_url, 
+                            timeout=15,
+                            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                        )
+                        response.raise_for_status()
+                        break
+                    except:
+                        return jsonify({"error": f"Failed to fetch thumbnail after {max_retries} attempts: {str(e)}"}), 500
                 time.sleep(2)  # Brief delay before retry
         
         # Encode thumbnail
@@ -327,9 +345,10 @@ def download_video_stream(url, format_selector):
             'fragment_retries': 3
         }
         
-        # Add proxy configuration to yt-dlp options
-        proxy_opts = get_ydl_proxy_opts()
-        ydl_opts.update(proxy_opts)
+        # Add proxy configuration to yt-dlp options if enabled
+        if PROXY_CONFIG['enabled'] and PROXY_CONFIG['fallback_proxies']:
+            proxy_opts = get_ydl_proxy_opts()
+            ydl_opts.update(proxy_opts)
         
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -347,8 +366,8 @@ def download_video_stream(url, format_selector):
                     
         except Exception as e:
             # Try with different proxy if available
-            if PROXY_CONFIG['enabled'] and PROXY_CONFIG['fallback_proxies']:
-                for proxy in PROXY_CONFIG['fallback_proxies']:
+            if PROXY_CONFIG['enabled'] and len(PROXY_CONFIG['fallback_proxies']) > 1:
+                for proxy in PROXY_CONFIG['fallback_proxies'][1:]:
                     try:
                         ydl_opts = {
                             'outtmpl': filename_template,
@@ -377,7 +396,31 @@ def download_video_stream(url, format_selector):
                     except:
                         continue
             
-            yield b''  # Empty response on error
+            # Try without proxy as last resort
+            try:
+                ydl_opts = {
+                    'outtmpl': filename_template,
+                    'format': format_selector,
+                    'quiet': True,
+                    'socket_timeout': 20,
+                    'retries': 2,
+                    'fragment_retries': 2
+                }
+                
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    downloaded_file = ydl.prepare_filename(info)
+                
+                # Stream the file in chunks
+                chunk_size = 8192
+                with open(downloaded_file, 'rb') as f:
+                    while True:
+                        chunk = f.read(chunk_size)
+                        if not chunk:
+                            break
+                        yield chunk
+            except:
+                yield b''  # Empty response on error
 
 @app.route('/get-reel-info', methods=['POST'])
 def get_reel_info():
@@ -520,8 +563,7 @@ def root():
             "timeout_handling", 
             "rate_limit_handling",
             "proxy_support",
-            "indian_proxies",
-            "proxy_rotation"
+            "proxy_fallback"
         ]
     })
 
