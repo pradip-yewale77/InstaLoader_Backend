@@ -1,4 +1,3 @@
-
 from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 import yt_dlp
@@ -14,6 +13,7 @@ import signal
 import sys
 from functools import wraps
 import random
+import re
 
 app = Flask(__name__)
 CORS(app)
@@ -29,6 +29,35 @@ PROXY_CONFIG = {
     'primary_proxy': os.getenv('PRIMARY_PROXY', ''),
     'fallback_proxies': []
 }
+
+# User agents for Instagram
+USER_AGENTS = [
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1',
+    'Mozilla/5.0 (Android 11; Mobile; rv:68.0) Gecko/68.0 Firefox/88.0',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+]
+
+def get_random_user_agent():
+    """Get a random user agent"""
+    return random.choice(USER_AGENTS)
+
+def get_instagram_headers():
+    """Get headers optimized for Instagram"""
+    return {
+        'User-Agent': get_random_user_agent(),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Cache-Control': 'max-age=0'
+    }
 
 # Load proxy configuration from environment or use defaults
 def load_proxy_config():
@@ -122,9 +151,25 @@ def is_cache_valid(timestamp):
     """Check if cache entry is still valid"""
     return time.time() - timestamp < CACHE_DURATION
 
+def validate_instagram_url(url):
+    """Validate Instagram URL"""
+    instagram_patterns = [
+        r'https?://(www\.)?instagram\.com/(p|reel)/[A-Za-z0-9_-]+/?',
+        r'https?://(www\.)?instagram\.com/stories/[A-Za-z0-9_.-]+/[0-9]+/?'
+    ]
+    
+    for pattern in instagram_patterns:
+        if re.match(pattern, url):
+            return True
+    return False
+
 def get_video_info_with_cache(url):
     """Get video info with caching to avoid repeated yt-dlp calls"""
     cache_key = get_cache_key(url)
+    
+    # Validate URL first
+    if not validate_instagram_url(url):
+        raise ValueError("Invalid Instagram URL format")
     
     # Check cache first
     if cache_key in METADATA_CACHE:
@@ -133,76 +178,80 @@ def get_video_info_with_cache(url):
             return cached_data
     
     # If not in cache or expired, fetch new data
-    try:
-        ydl_opts = {
-            'quiet': True,
-            'skip_download': True,
-            'force_generic_extractor': False,
-            'socket_timeout': 15,
-            'retries': 3
-        }
-        
-        # Add proxy configuration to yt-dlp options if enabled
-        if PROXY_CONFIG['enabled'] and PROXY_CONFIG['fallback_proxies']:
-            proxy_opts = get_ydl_proxy_opts()
-            ydl_opts.update(proxy_opts)
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            
-        # Cache the result
-        METADATA_CACHE[cache_key] = (info, time.time())
-        return info
-        
-    except Exception as e:
-        # Try with different proxy if available and enabled
-        if PROXY_CONFIG['enabled'] and len(PROXY_CONFIG['fallback_proxies']) > 1:
-            for proxy in PROXY_CONFIG['fallback_proxies'][1:]:  # Skip first proxy
-                try:
-                    ydl_opts = {
-                        'quiet': True,
-                        'skip_download': True,
-                        'force_generic_extractor': False,
-                        'socket_timeout': 15,
-                        'retries': 2
+    max_attempts = 3
+    last_error = None
+    
+    for attempt in range(max_attempts):
+        try:
+            ydl_opts = {
+                'quiet': True,
+                'skip_download': True,
+                'force_generic_extractor': False,
+                'socket_timeout': 30,
+                'retries': 5,
+                'http_headers': get_instagram_headers(),
+                'extractor_args': {
+                    'instagram': {
+                        'comment_count': 0,
+                        'like_count': 0
                     }
-                    proxy_opts = get_ydl_proxy_opts(proxy)
-                    ydl_opts.update(proxy_opts)
-                    
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(url, download=False)
-                        
-                    # Cache the result
-                    METADATA_CACHE[cache_key] = (info, time.time())
-                    return info
-                except:
-                    continue
-        
-        # Try without proxy if proxy was causing issues
-        if PROXY_CONFIG['enabled']:
-            try:
-                ydl_opts = {
-                    'quiet': True,
-                    'skip_download': True,
-                    'force_generic_extractor': False,
-                    'socket_timeout': 15,
-                    'retries': 2
                 }
+            }
+            
+            # Add proxy configuration to yt-dlp options if enabled
+            if PROXY_CONFIG['enabled'] and PROXY_CONFIG['fallback_proxies']:
+                proxy_opts = get_ydl_proxy_opts()
+                ydl_opts.update(proxy_opts)
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
                 
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    
-                # Cache the result
-                METADATA_CACHE[cache_key] = (info, time.time())
-                return info
-            except:
-                pass
+            # Cache the result
+            METADATA_CACHE[cache_key] = (info, time.time())
+            return info
+            
+        except Exception as e:
+            last_error = e
+            time.sleep(2 ** attempt)  # Exponential backoff
+            
+            # Try with different proxy if available and enabled
+            if PROXY_CONFIG['enabled'] and len(PROXY_CONFIG['fallback_proxies']) > 1:
+                continue
         
-        # If we have expired cache, return it as fallback
-        if cache_key in METADATA_CACHE:
-            cached_data, _ = METADATA_CACHE[cache_key]
-            return cached_data
-        raise e
+    # Try without proxy if proxy was causing issues
+    if PROXY_CONFIG['enabled']:
+        try:
+            ydl_opts = {
+                'quiet': True,
+                'skip_download': True,
+                'force_generic_extractor': False,
+                'socket_timeout': 30,
+                'retries': 5,
+                'http_headers': get_instagram_headers(),
+                'extractor_args': {
+                    'instagram': {
+                        'comment_count': 0,
+                        'like_count': 0
+                    }
+                }
+            }
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                
+            # Cache the result
+            METADATA_CACHE[cache_key] = (info, time.time())
+            return info
+        except Exception as e:
+            last_error = e
+    
+    # If we have expired cache, return it as fallback
+    if cache_key in METADATA_CACHE:
+        cached_data, _ = METADATA_CACHE[cache_key]
+        return cached_data
+    
+    # If all fails, raise the last error
+    raise last_error if last_error else Exception("Failed to extract video info")
 
 @app.route('/get-reel-thumbnail', methods=['POST'])
 def get_thumbnail():
@@ -212,6 +261,10 @@ def get_thumbnail():
         return jsonify({"error": "Missing 'url' in request"}), 400
 
     try:
+        # Validate URL
+        if not validate_instagram_url(url):
+            return jsonify({"error": "Invalid Instagram URL format"}), 400
+        
         cache_key = get_cache_key(url)
         
         # Check thumbnail cache first
@@ -226,10 +279,10 @@ def get_thumbnail():
         video_id = info.get("id", "unknown")
         
         if not thumbnail_url:
-            return jsonify({"error": "No thumbnail found"}), 404
+            return jsonify({"error": "No thumbnail found for this Instagram post"}), 404
 
         # Fetch thumbnail with timeout and retry logic
-        max_retries = 3
+        max_retries = 5
         proxies = get_proxy_dict() if PROXY_CONFIG['enabled'] else None
         
         for attempt in range(max_retries):
@@ -238,55 +291,89 @@ def get_thumbnail():
                 if PROXY_CONFIG['enabled'] and attempt > 0 and len(PROXY_CONFIG['fallback_proxies']) > 1:
                     proxies = get_proxy_dict(get_random_proxy())
                 
+                # Use Instagram-optimized headers
+                headers = get_instagram_headers()
+                
                 response = requests.get(
                     thumbnail_url, 
-                    timeout=15,
+                    timeout=(10, 30),  # (connect timeout, read timeout)
                     proxies=proxies,
-                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                    headers=headers,
+                    stream=True,
+                    verify=True
                 )
                 response.raise_for_status()
+                
+                # Check if response is actually an image
+                content_type = response.headers.get('content-type', '').lower()
+                if not content_type.startswith('image/'):
+                    raise requests.RequestException(f"Invalid content type: {content_type}")
+                
                 break
+                
             except requests.RequestException as e:
                 if attempt == max_retries - 1:
-                    # Try once more without proxy
+                    # Try once more without proxy and with minimal headers
                     try:
                         response = requests.get(
                             thumbnail_url, 
-                            timeout=15,
-                            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                            timeout=(10, 30),
+                            headers={'User-Agent': get_random_user_agent()},
+                            stream=True,
+                            verify=True
                         )
                         response.raise_for_status()
                         break
-                    except:
-                        return jsonify({"error": f"Failed to fetch thumbnail after {max_retries} attempts: {str(e)}"}), 500
-                time.sleep(2)  # Brief delay before retry
+                    except Exception as final_e:
+                        return jsonify({
+                            "error": f"Failed to fetch thumbnail after {max_retries} attempts. Last error: {str(final_e)}"
+                        }), 500
+                
+                # Exponential backoff
+                time.sleep(min(2 ** attempt, 10))
         
-        # Encode thumbnail
-        image_data = base64.b64encode(response.content).decode('utf-8')
-        mime = response.headers.get("Content-Type", "image/jpeg")
-        
-        result = {
-            "shortcode": video_id,
-            "thumbnail_url": thumbnail_url,
-            "thumbnail_base64": f"data:{mime};base64,{image_data}",
-            "duration": info.get("duration", 0),
-            "title": info.get("title", ""),
-            "uploader": info.get("uploader", ""),
-            "proxy_used": bool(proxies)
-        }
-        
-        # Cache the result
-        THUMBNAIL_CACHE[cache_key] = (result, time.time())
-        
-        return jsonify(result)
+        # Read and encode thumbnail
+        try:
+            image_content = response.content
+            if len(image_content) == 0:
+                raise ValueError("Empty image content")
+            
+            image_data = base64.b64encode(image_content).decode('utf-8')
+            mime = response.headers.get("Content-Type", "image/jpeg")
+            
+            result = {
+                "shortcode": video_id,
+                "thumbnail_url": thumbnail_url,
+                "thumbnail_base64": f"data:{mime};base64,{image_data}",
+                "duration": info.get("duration", 0),
+                "title": info.get("title", ""),
+                "uploader": info.get("uploader", ""),
+                "proxy_used": bool(proxies),
+                "timestamp": int(time.time())
+            }
+            
+            # Cache the result
+            THUMBNAIL_CACHE[cache_key] = (result, time.time())
+            
+            return jsonify(result)
+            
+        except Exception as e:
+            return jsonify({"error": f"Failed to process thumbnail image: {str(e)}"}), 500
 
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except TimeoutError:
-        return jsonify({"error": "Request timed out. Please try again."}), 408
+        return jsonify({"error": "Request timed out. Instagram may be blocking requests. Please try again later."}), 408
     except Exception as e:
-        error_msg = str(e)
-        if "rate limit" in error_msg.lower():
+        error_msg = str(e).lower()
+        if any(keyword in error_msg for keyword in ["rate limit", "too many requests", "429"]):
             return jsonify({"error": "Rate limited by Instagram. Please try again later."}), 429
-        return jsonify({"error": f"Failed to get thumbnail: {error_msg}"}), 500
+        elif any(keyword in error_msg for keyword in ["blocked", "forbidden", "403"]):
+            return jsonify({"error": "Access blocked by Instagram. Try using a proxy or VPN."}), 403
+        elif any(keyword in error_msg for keyword in ["unavailable", "private", "not found"]):
+            return jsonify({"error": "Instagram post not found or is private."}), 404
+        else:
+            return jsonify({"error": f"Failed to get thumbnail: {str(e)}"}), 500
 
 @app.route('/download-reel', methods=['POST'])
 def download_reel():
@@ -298,13 +385,17 @@ def download_reel():
         return jsonify({"error": "Missing 'url' in request"}), 400
 
     try:
+        # Validate URL
+        if not validate_instagram_url(url):
+            return jsonify({"error": "Invalid Instagram URL format"}), 400
+        
         # Get video info first
         info = get_video_info_with_cache(url)
         
         # Check video size and duration to prevent timeouts
         duration = info.get("duration", 0)
-        if duration > 300:  # 5 minutes
-            return jsonify({"error": "Video too long. Maximum duration is 5 minutes."}), 400
+        if duration > 600:  # 10 minutes
+            return jsonify({"error": "Video too long. Maximum duration is 10 minutes."}), 400
         
         # Select appropriate format based on quality
         format_selector = {
@@ -319,17 +410,23 @@ def download_reel():
             mimetype='video/mp4',
             headers={
                 'Content-Disposition': f'attachment; filename="reel_{uuid.uuid4().hex[:8]}.mp4"',
-                'Content-Type': 'video/mp4'
+                'Content-Type': 'video/mp4',
+                'Cache-Control': 'no-cache'
             }
         )
         
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except TimeoutError:
         return jsonify({"error": "Download timed out. Try selecting a lower quality."}), 408
     except Exception as e:
-        error_msg = str(e)
-        if "rate limit" in error_msg.lower():
+        error_msg = str(e).lower()
+        if any(keyword in error_msg for keyword in ["rate limit", "too many requests"]):
             return jsonify({"error": "Rate limited by Instagram. Please try again later."}), 429
-        return jsonify({"error": f"Download failed: {error_msg}"}), 500
+        elif any(keyword in error_msg for keyword in ["blocked", "forbidden"]):
+            return jsonify({"error": "Access blocked by Instagram. Try using a proxy or VPN."}), 403
+        else:
+            return jsonify({"error": f"Download failed: {str(e)}"}), 500
 
 def download_video_stream(url, format_selector):
     """Stream video download to avoid memory issues"""
@@ -341,9 +438,16 @@ def download_video_stream(url, format_selector):
             'outtmpl': filename_template,
             'format': format_selector,
             'quiet': True,
-            'socket_timeout': 20,
-            'retries': 3,
-            'fragment_retries': 3
+            'socket_timeout': 30,
+            'retries': 5,
+            'fragment_retries': 5,
+            'http_headers': get_instagram_headers(),
+            'extractor_args': {
+                'instagram': {
+                    'comment_count': 0,
+                    'like_count': 0
+                }
+            }
         }
         
         # Add proxy configuration to yt-dlp options if enabled
@@ -355,6 +459,10 @@ def download_video_stream(url, format_selector):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
                 downloaded_file = ydl.prepare_filename(info)
+            
+            # Check if file exists and has content
+            if not os.path.exists(downloaded_file) or os.path.getsize(downloaded_file) == 0:
+                raise Exception("Downloaded file is empty or missing")
             
             # Stream the file in chunks
             chunk_size = 8192
@@ -374,9 +482,10 @@ def download_video_stream(url, format_selector):
                             'outtmpl': filename_template,
                             'format': format_selector,
                             'quiet': True,
-                            'socket_timeout': 20,
-                            'retries': 2,
-                            'fragment_retries': 2
+                            'socket_timeout': 30,
+                            'retries': 3,
+                            'fragment_retries': 3,
+                            'http_headers': get_instagram_headers()
                         }
                         proxy_opts = get_ydl_proxy_opts(proxy)
                         ydl_opts.update(proxy_opts)
@@ -403,9 +512,10 @@ def download_video_stream(url, format_selector):
                     'outtmpl': filename_template,
                     'format': format_selector,
                     'quiet': True,
-                    'socket_timeout': 20,
-                    'retries': 2,
-                    'fragment_retries': 2
+                    'socket_timeout': 30,
+                    'retries': 3,
+                    'fragment_retries': 3,
+                    'http_headers': get_instagram_headers()
                 }
                 
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -432,6 +542,10 @@ def get_reel_info():
         return jsonify({"error": "Missing 'url' in request"}), 400
 
     try:
+        # Validate URL
+        if not validate_instagram_url(url):
+            return jsonify({"error": "Invalid Instagram URL format"}), 400
+        
         info = get_video_info_with_cache(url)
         
         # Extract relevant information
@@ -455,13 +569,22 @@ def get_reel_info():
                 }
                 for fmt in info.get("formats", [])
                 if fmt.get("ext") in ["mp4", "webm"]
-            ][:5]  # Limit to top 5 formats
+            ][:5],  # Limit to top 5 formats
+            "timestamp": int(time.time())
         }
         
         return jsonify(result)
         
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        error_msg = str(e).lower()
+        if any(keyword in error_msg for keyword in ["rate limit", "too many requests"]):
+            return jsonify({"error": "Rate limited by Instagram. Please try again later."}), 429
+        elif any(keyword in error_msg for keyword in ["blocked", "forbidden"]):
+            return jsonify({"error": "Access blocked by Instagram. Try using a proxy or VPN."}), 403
+        else:
+            return jsonify({"error": str(e)}), 500
 
 @app.route('/proxy-config', methods=['GET'])
 def get_proxy_config():
@@ -532,7 +655,8 @@ def health_check():
         "proxy_config": {
             "enabled": PROXY_CONFIG['enabled'],
             "proxies_available": len(PROXY_CONFIG['fallback_proxies'])
-        }
+        },
+        "version": "2.1.1"
     })
 
 @app.route('/clear-cache', methods=['POST'])
@@ -546,7 +670,7 @@ def clear_cache():
 @app.route("/")
 def root():
     return jsonify({
-        "message": "Instagram Reel Downloader API with Proxy Support",
+        "message": "Instagram Reel Downloader API with Enhanced Error Handling",
         "endpoints": {
             "GET /health": "Health check",
             "POST /get-reel-thumbnail": "Get reel thumbnail",
@@ -557,14 +681,17 @@ def root():
             "POST /proxy-config": "Update proxy configuration",
             "POST /test-proxy": "Test proxy connectivity"
         },
-        "version": "2.1",
+        "version": "2.1.1",
         "features": [
             "streaming", 
             "caching", 
             "timeout_handling", 
             "rate_limit_handling",
             "proxy_support",
-            "proxy_fallback"
+            "proxy_fallback",
+            "enhanced_error_handling",
+            "instagram_headers",
+            "url_validation"
         ]
     })
 
@@ -582,4 +709,4 @@ def internal_error(error):
     return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=False)
