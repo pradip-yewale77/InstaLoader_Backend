@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 import signal
 import sys
 from functools import wraps
+import random
 
 app = Flask(__name__)
 CORS(app)
@@ -20,6 +21,81 @@ CORS(app)
 THUMBNAIL_CACHE = {}
 METADATA_CACHE = {}
 CACHE_DURATION = 3600  # 1 hour
+
+# Proxy configuration
+PROXY_CONFIG = {
+    'enabled': os.getenv('PROXY_ENABLED', 'true').lower() == 'true',
+    'primary_proxy': os.getenv('PRIMARY_PROXY', ''),
+    'fallback_proxies': []
+}
+
+# Indian proxy servers (you can add more)
+INDIAN_PROXIES = [
+    'http://proxy-in-1.example.com:8080',
+    'http://proxy-in-2.example.com:8080',
+    'http://proxy-mumbai.example.com:8080',
+    'http://proxy-delhi.example.com:8080'
+]
+
+# Load proxy configuration from environment or use defaults
+def load_proxy_config():
+    """Load proxy configuration from environment variables"""
+    global PROXY_CONFIG
+    
+    # Check for environment variables
+    if os.getenv('PROXY_LIST'):
+        proxy_list = os.getenv('PROXY_LIST').split(',')
+        PROXY_CONFIG['fallback_proxies'] = [proxy.strip() for proxy in proxy_list]
+    else:
+        # Use default Indian proxies (you should replace with actual working proxies)
+        PROXY_CONFIG['fallback_proxies'] = INDIAN_PROXIES
+    
+    # Set primary proxy if provided
+    if os.getenv('PRIMARY_PROXY'):
+        PROXY_CONFIG['primary_proxy'] = os.getenv('PRIMARY_PROXY')
+    elif PROXY_CONFIG['fallback_proxies']:
+        PROXY_CONFIG['primary_proxy'] = PROXY_CONFIG['fallback_proxies'][0]
+
+def get_random_proxy():
+    """Get a random proxy from the configured list"""
+    if not PROXY_CONFIG['enabled'] or not PROXY_CONFIG['fallback_proxies']:
+        return None
+    
+    return random.choice(PROXY_CONFIG['fallback_proxies'])
+
+def get_proxy_dict(proxy_url=None):
+    """Get proxy dictionary for requests"""
+    if not PROXY_CONFIG['enabled']:
+        return None
+    
+    if proxy_url is None:
+        proxy_url = PROXY_CONFIG['primary_proxy'] or get_random_proxy()
+    
+    if proxy_url:
+        return {
+            'http': proxy_url,
+            'https': proxy_url
+        }
+    return None
+
+def get_ydl_proxy_opts(proxy_url=None):
+    """Get yt-dlp proxy options"""
+    if not PROXY_CONFIG['enabled']:
+        return {}
+    
+    if proxy_url is None:
+        proxy_url = PROXY_CONFIG['primary_proxy'] or get_random_proxy()
+    
+    if proxy_url:
+        return {
+            'proxy': proxy_url,
+            'socket_timeout': 20,  # Increased timeout for proxy
+            'retries': 3
+        }
+    return {}
+
+# Initialize proxy configuration
+load_proxy_config()
 
 # Timeout handler for long-running operations
 class TimeoutError(Exception):
@@ -74,9 +150,13 @@ def get_video_info_with_cache(url):
             'quiet': True,
             'skip_download': True,
             'force_generic_extractor': False,
-            'socket_timeout': 10,
-            'retries': 2
+            'socket_timeout': 15,
+            'retries': 3
         }
+        
+        # Add proxy configuration to yt-dlp options
+        proxy_opts = get_ydl_proxy_opts()
+        ydl_opts.update(proxy_opts)
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
@@ -86,6 +166,29 @@ def get_video_info_with_cache(url):
         return info
         
     except Exception as e:
+        # Try with different proxy if available
+        if PROXY_CONFIG['enabled'] and PROXY_CONFIG['fallback_proxies']:
+            for proxy in PROXY_CONFIG['fallback_proxies']:
+                try:
+                    ydl_opts = {
+                        'quiet': True,
+                        'skip_download': True,
+                        'force_generic_extractor': False,
+                        'socket_timeout': 15,
+                        'retries': 2
+                    }
+                    proxy_opts = get_ydl_proxy_opts(proxy)
+                    ydl_opts.update(proxy_opts)
+                    
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=False)
+                        
+                    # Cache the result
+                    METADATA_CACHE[cache_key] = (info, time.time())
+                    return info
+                except:
+                    continue
+        
         # If we have expired cache, return it as fallback
         if cache_key in METADATA_CACHE:
             cached_data, _ = METADATA_CACHE[cache_key]
@@ -118,19 +221,26 @@ def get_thumbnail():
 
         # Fetch thumbnail with timeout and retry logic
         max_retries = 3
+        proxies = get_proxy_dict()
+        
         for attempt in range(max_retries):
             try:
+                # Use different proxy for each retry if available
+                if PROXY_CONFIG['enabled'] and attempt > 0:
+                    proxies = get_proxy_dict(get_random_proxy())
+                
                 response = requests.get(
                     thumbnail_url, 
-                    timeout=10,
+                    timeout=15,
+                    proxies=proxies,
                     headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
                 )
                 response.raise_for_status()
                 break
             except requests.RequestException as e:
                 if attempt == max_retries - 1:
-                    return jsonify({"error": f"Failed to fetch thumbnail after {max_retries} attempts"}), 500
-                time.sleep(1)  # Brief delay before retry
+                    return jsonify({"error": f"Failed to fetch thumbnail after {max_retries} attempts: {str(e)}"}), 500
+                time.sleep(2)  # Brief delay before retry
         
         # Encode thumbnail
         image_data = base64.b64encode(response.content).decode('utf-8')
@@ -142,7 +252,8 @@ def get_thumbnail():
             "thumbnail_base64": f"data:{mime};base64,{image_data}",
             "duration": info.get("duration", 0),
             "title": info.get("title", ""),
-            "uploader": info.get("uploader", "")
+            "uploader": info.get("uploader", ""),
+            "proxy_used": bool(proxies)
         }
         
         # Cache the result
@@ -211,10 +322,14 @@ def download_video_stream(url, format_selector):
             'outtmpl': filename_template,
             'format': format_selector,
             'quiet': True,
-            'socket_timeout': 15,
-            'retries': 2,
+            'socket_timeout': 20,
+            'retries': 3,
             'fragment_retries': 3
         }
+        
+        # Add proxy configuration to yt-dlp options
+        proxy_opts = get_ydl_proxy_opts()
+        ydl_opts.update(proxy_opts)
         
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -231,6 +346,37 @@ def download_video_stream(url, format_selector):
                     yield chunk
                     
         except Exception as e:
+            # Try with different proxy if available
+            if PROXY_CONFIG['enabled'] and PROXY_CONFIG['fallback_proxies']:
+                for proxy in PROXY_CONFIG['fallback_proxies']:
+                    try:
+                        ydl_opts = {
+                            'outtmpl': filename_template,
+                            'format': format_selector,
+                            'quiet': True,
+                            'socket_timeout': 20,
+                            'retries': 2,
+                            'fragment_retries': 2
+                        }
+                        proxy_opts = get_ydl_proxy_opts(proxy)
+                        ydl_opts.update(proxy_opts)
+                        
+                        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                            info = ydl.extract_info(url, download=True)
+                            downloaded_file = ydl.prepare_filename(info)
+                        
+                        # Stream the file in chunks
+                        chunk_size = 8192
+                        with open(downloaded_file, 'rb') as f:
+                            while True:
+                                chunk = f.read(chunk_size)
+                                if not chunk:
+                                    break
+                                yield chunk
+                        return
+                    except:
+                        continue
+            
             yield b''  # Empty response on error
 
 @app.route('/get-reel-info', methods=['POST'])
@@ -273,6 +419,62 @@ def get_reel_info():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/proxy-config', methods=['GET'])
+def get_proxy_config():
+    """Get current proxy configuration"""
+    return jsonify({
+        "proxy_enabled": PROXY_CONFIG['enabled'],
+        "primary_proxy": PROXY_CONFIG['primary_proxy'],
+        "fallback_proxies_count": len(PROXY_CONFIG['fallback_proxies']),
+        "total_proxies": len(PROXY_CONFIG['fallback_proxies'])
+    })
+
+@app.route('/proxy-config', methods=['POST'])
+def update_proxy_config():
+    """Update proxy configuration"""
+    data = request.get_json()
+    
+    if 'enabled' in data:
+        PROXY_CONFIG['enabled'] = data['enabled']
+    
+    if 'primary_proxy' in data:
+        PROXY_CONFIG['primary_proxy'] = data['primary_proxy']
+    
+    if 'fallback_proxies' in data:
+        PROXY_CONFIG['fallback_proxies'] = data['fallback_proxies']
+    
+    return jsonify({"message": "Proxy configuration updated successfully"})
+
+@app.route('/test-proxy', methods=['POST'])
+def test_proxy():
+    """Test proxy connectivity"""
+    data = request.get_json()
+    proxy_url = data.get('proxy_url') or PROXY_CONFIG['primary_proxy']
+    
+    if not proxy_url:
+        return jsonify({"error": "No proxy URL provided"}), 400
+    
+    try:
+        proxies = get_proxy_dict(proxy_url)
+        test_url = "https://httpbin.org/ip"
+        
+        response = requests.get(test_url, proxies=proxies, timeout=10)
+        response.raise_for_status()
+        
+        return jsonify({
+            "status": "success",
+            "proxy_url": proxy_url,
+            "response": response.json(),
+            "response_time": response.elapsed.total_seconds()
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "status": "failed",
+            "proxy_url": proxy_url,
+            "error": str(e)
+        }), 500
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
@@ -282,6 +484,10 @@ def health_check():
         "cache_stats": {
             "thumbnails_cached": len(THUMBNAIL_CACHE),
             "metadata_cached": len(METADATA_CACHE)
+        },
+        "proxy_config": {
+            "enabled": PROXY_CONFIG['enabled'],
+            "proxies_available": len(PROXY_CONFIG['fallback_proxies'])
         }
     })
 
@@ -296,16 +502,27 @@ def clear_cache():
 @app.route("/")
 def root():
     return jsonify({
-        "message": "Instagram Reel Downloader API",
+        "message": "Instagram Reel Downloader API with Proxy Support",
         "endpoints": {
             "GET /health": "Health check",
             "POST /get-reel-thumbnail": "Get reel thumbnail",
             "POST /get-reel-info": "Get reel information",
             "POST /download-reel": "Download reel (supports quality parameter)",
-            "POST /clear-cache": "Clear cache"
+            "POST /clear-cache": "Clear cache",
+            "GET /proxy-config": "Get proxy configuration",
+            "POST /proxy-config": "Update proxy configuration",
+            "POST /test-proxy": "Test proxy connectivity"
         },
-        "version": "2.0",
-        "features": ["streaming", "caching", "timeout_handling", "rate_limit_handling"]
+        "version": "2.1",
+        "features": [
+            "streaming", 
+            "caching", 
+            "timeout_handling", 
+            "rate_limit_handling",
+            "proxy_support",
+            "indian_proxies",
+            "proxy_rotation"
+        ]
     })
 
 # Error handlers

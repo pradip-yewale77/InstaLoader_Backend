@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  instagram-downloader:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - PROXY_ENABLED=true
+      - PROXY_TIMEOUT=20
+      - PROXY_RETRIES=3
+      # Add your proxy configuration here
+      # - PRIMARY_PROXY=http://your-proxy:8080
+      # - PROXY_LIST=http://proxy1:8080,http://proxy2:3128
+    volumes:
+      - ./proxy_config.py:/app/proxy_config.py
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: Redis for caching (if you want to use Redis instead of in-memory cache)
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6379:6379"
+  #   command: redis-server --appendonly yes
+  #   volumes:
+  #     - redis_data:/data
+  #   restart: unless-stopped
+
+# volumes:
+#   redis_data:
